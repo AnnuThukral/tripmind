@@ -2,7 +2,10 @@
 
 import dynamic from "next/dynamic";
 import type { PlanResult } from "@/lib/agent/planner";
+import { dayDirectionsUrl } from "@/lib/itinerary/links";
 import { dayStops } from "@/lib/itinerary/stops";
+import type { ItineraryItem } from "@/lib/schema/trip";
+import type { Feedback } from "@/lib/storage";
 
 // Leaflet touches `window` on import, so the map only loads in the browser.
 const DayMap = dynamic(() => import("./DayMap"), {
@@ -22,27 +25,41 @@ function osmUrl(placeId: string): string {
   return `https://www.openstreetmap.org/${placeId.replace(/^osm:/, "")}`;
 }
 
-export function ItineraryView({ result }: { result: PlanResult }) {
-  const { itinerary, places, warnings } = result;
-  return (
-    <section className="space-y-6">
-      <header className="space-y-2">
-        <h2 className="text-2xl font-semibold">{itinerary.destination}</h2>
-        <p className="text-zinc-600 dark:text-zinc-400">{itinerary.summary}</p>
-        {itinerary.estimatedTotalPerPerson !== null && (
-          <p className="text-sm font-medium">
-            Estimated total per person: {itinerary.estimatedTotalPerPerson.toLocaleString()}{" "}
-            {itinerary.currency}
-          </p>
-        )}
-      </header>
+/** What we remember about an item for personalization. */
+export function feedbackLabel(item: ItineraryItem): string {
+  return (item.placeName ?? item.title).slice(0, 80);
+}
 
+export interface ItineraryActions {
+  busyDays: number[];
+  onRegenerateDay: (day: number) => void;
+  onSwapItem: (day: number, itemIndex: number) => void;
+  feedback: Feedback;
+  onVote: (label: string, vote: "liked" | "disliked" | null) => void;
+}
+
+const iconButton =
+  "rounded-md px-1.5 py-0.5 text-xs text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-900 disabled:opacity-40 aria-pressed:bg-zinc-200 aria-pressed:text-zinc-900 dark:hover:bg-zinc-800 dark:hover:text-zinc-100 dark:aria-pressed:bg-zinc-700 dark:aria-pressed:text-white";
+
+export function ItineraryView({
+  result,
+  actions,
+}: {
+  result: Pick<PlanResult, "itinerary" | "places">;
+  actions?: ItineraryActions;
+}) {
+  const { itinerary, places } = result;
+  return (
+    <div className="space-y-6">
       {itinerary.days.map((day) => {
         const stops = dayStops(day, places);
+        const directions = dayDirectionsUrl(stops);
+        const busy = actions?.busyDays.includes(day.day) ?? false;
         return (
           <article
             key={day.day}
-            className="rounded-2xl border border-zinc-200 p-5 dark:border-zinc-800"
+            aria-busy={busy}
+            className="break-inside-avoid rounded-2xl border border-zinc-200 p-5 aria-busy:animate-pulse dark:border-zinc-800"
           >
             <div className="mb-4 flex flex-wrap items-baseline justify-between gap-2">
               <h3 className="text-lg font-semibold">
@@ -56,13 +73,43 @@ export function ItineraryView({ result }: { result: PlanResult }) {
               <p className="mb-3 text-sm text-zinc-500">Weather: {day.weatherNote}</p>
             )}
             {stops.length > 0 && (
-              <div className="mb-4">
+              <div className="mb-2 print:hidden">
                 <DayMap stops={stops} />
+              </div>
+            )}
+            {(directions || actions) && (
+              <div className="mb-4 flex flex-wrap gap-3 text-sm print:hidden">
+                {directions && (
+                  <a
+                    href={directions}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sky-700 underline underline-offset-4 dark:text-sky-400"
+                  >
+                    Walking route in Google Maps
+                  </a>
+                )}
+                {actions && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => actions.onRegenerateDay(day.day)}
+                    className="text-sky-700 underline underline-offset-4 disabled:opacity-50 dark:text-sky-400"
+                  >
+                    {busy ? "Updating…" : "Regenerate this day"}
+                  </button>
+                )}
               </div>
             )}
             <ol className="space-y-3">
               {day.items.map((item, i) => {
                 const stop = stops.find((s) => s.itemIndex === i);
+                const label = feedbackLabel(item);
+                const vote = actions?.feedback.liked.includes(label)
+                  ? "liked"
+                  : actions?.feedback.disliked.includes(label)
+                    ? "disliked"
+                    : null;
                 return (
                   <li key={i} className="grid grid-cols-[3.5rem_1fr] gap-3">
                     <span className="pt-0.5 font-mono text-sm text-zinc-500">{item.time}</span>
@@ -100,6 +147,43 @@ export function ItineraryView({ result }: { result: PlanResult }) {
                             ~{item.estimatedCostPerPerson} {itinerary.currency}
                           </span>
                         )}
+                        {actions && (
+                          <span className="ml-auto flex gap-1 print:hidden">
+                            <button
+                              type="button"
+                              className={iconButton}
+                              aria-pressed={vote === "liked"}
+                              aria-label={`Like ${item.title}`}
+                              title="More like this on future trips"
+                              onClick={() =>
+                                actions.onVote(label, vote === "liked" ? null : "liked")
+                              }
+                            >
+                              👍
+                            </button>
+                            <button
+                              type="button"
+                              className={iconButton}
+                              aria-pressed={vote === "disliked"}
+                              aria-label={`Dislike ${item.title}`}
+                              title="Less like this on future trips"
+                              onClick={() =>
+                                actions.onVote(label, vote === "disliked" ? null : "disliked")
+                              }
+                            >
+                              👎
+                            </button>
+                            <button
+                              type="button"
+                              className={iconButton}
+                              disabled={busy}
+                              title="Replace with a different option"
+                              onClick={() => actions.onSwapItem(day.day, i)}
+                            >
+                              Swap
+                            </button>
+                          </span>
+                        )}
                       </div>
                       <p className="text-sm text-zinc-600 dark:text-zinc-400">{item.whyItFits}</p>
                       {item.notes && <p className="text-sm text-zinc-500">{item.notes}</p>}
@@ -111,33 +195,6 @@ export function ItineraryView({ result }: { result: PlanResult }) {
           </article>
         );
       })}
-
-      {itinerary.tips.length > 0 && (
-        <aside className="rounded-2xl bg-zinc-100 p-5 dark:bg-zinc-900">
-          <h3 className="mb-2 font-semibold">Local tips</h3>
-          <ul className="list-disc space-y-1 pl-5 text-sm">
-            {itinerary.tips.map((tip, i) => (
-              <li key={i}>{tip}</li>
-            ))}
-          </ul>
-        </aside>
-      )}
-
-      {warnings.length > 0 && (
-        <details className="text-xs text-zinc-500">
-          <summary>Quality checks ({warnings.length})</summary>
-          <ul className="mt-2 list-disc pl-5">
-            {warnings.map((w, i) => (
-              <li key={i}>{w}</li>
-            ))}
-          </ul>
-        </details>
-      )}
-
-      <p className="text-xs text-zinc-500">
-        Places from OpenStreetMap, weather from Open-Meteo. Check opening hours and prices before
-        you go.
-      </p>
-    </section>
+    </div>
   );
 }

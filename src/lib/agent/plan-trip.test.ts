@@ -1,7 +1,11 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TripRequestSchema, type Itinerary } from "@/lib/schema/trip";
+import { makeDay, makeItem, makeItinerary } from "@/test/fixtures";
+import { suggestDestinations } from "./ideas";
+import { MODEL } from "./model";
 import { categoriesFor, describePlaces, planTrip, PlannerError } from "./planner";
+import { mergeDays, reviseItinerary } from "./revise";
 
 vi.mock("@/lib/tools/cached", () => ({
   cachedGeocode: vi.fn(),
@@ -27,33 +31,12 @@ const museum = {
 };
 
 function itinerary(placeIds: (string | null)[]): Itinerary {
-  return {
-    destination: "Lisbon",
-    summary: "",
-    currency: "EUR",
-    estimatedTotalPerPerson: null,
-    tips: [],
-    days: [
-      {
-        day: 1,
-        date: "2026-11-01",
-        theme: "",
-        area: "",
-        weatherNote: null,
-        items: placeIds.map((placeId, i) => ({
-          time: `1${i}:00`,
-          type: "activity" as const,
-          title: `Item ${i}`,
-          placeId,
-          placeName: null,
-          durationMinutes: null,
-          estimatedCostPerPerson: null,
-          whyItFits: "",
-          notes: null,
-        })),
-      },
-    ],
-  };
+  return makeItinerary([
+    makeDay(
+      1,
+      placeIds.map((placeId, i) => makeItem({ time: `1${i}:00`, title: `Item ${i}`, placeId })),
+    ),
+  ]);
 }
 
 function fakeClient(output: unknown, stopReason = "end_turn") {
@@ -141,5 +124,79 @@ describe("describePlaces", () => {
     ).toContain(
       "osm:node/1 | Real Museum | museums | 38.7000,-9.1000 | hours=Tu-Su 10:00-18:00; diet=vegan",
     );
+  });
+});
+
+describe("every AI call", () => {
+  it("uses the pinned Haiku model", async () => {
+    const { client, parse } = fakeClient(itinerary([]));
+    await planTrip(trip, client);
+    expect(parse.mock.calls[0][0].model).toBe(MODEL);
+  });
+});
+
+describe("reviseItinerary", () => {
+  const twoDays = makeItinerary([
+    makeDay(1, [makeItem({ title: "Old day 1" })]),
+    makeDay(2, [makeItem({ title: "Old day 2" })]),
+  ]);
+
+  it("replaces only the changed days, keeps dates, and grounds new places", async () => {
+    const changed = {
+      ...makeDay(2, [
+        makeItem({ title: "New museum", placeId: "osm:node/1" }),
+        makeItem({ title: "Invented", placeId: "osm:node/404" }),
+      ]),
+      date: "2099-01-01",
+    };
+    const { client, parse } = fakeClient({ days: [changed], note: "Swapped day 2." });
+    const result = await reviseItinerary(
+      { trip, itinerary: twoDays, instruction: "Make day 2 about museums" },
+      client,
+    );
+
+    expect(parse.mock.calls[0][0].model).toBe(MODEL);
+    expect(parse.mock.calls[0][0].messages[0].content).toContain("Make day 2 about museums");
+    expect(result.changedDays).toEqual([2]);
+    expect(result.itinerary.days[0].items[0].title).toBe("Old day 1");
+    expect(result.itinerary.days[1].date).toBe("2026-11-02");
+    expect(result.itinerary.days[1].items.map((i) => i.placeId)).toEqual(["osm:node/1", null]);
+    expect(result.places).toEqual({ "osm:node/1": museum });
+    expect(result.note).toBe("Swapped day 2.");
+  });
+
+  it("rejects edits that touch no existing day", async () => {
+    const { client } = fakeClient({ days: [makeDay(9)], note: "" });
+    await expect(
+      reviseItinerary({ trip, itinerary: twoDays, instruction: "x x x" }, client),
+    ).rejects.toThrow(PlannerError);
+  });
+
+  it("mergeDays ignores unknown day numbers", () => {
+    const merged = mergeDays(twoDays, [makeDay(5, [makeItem({ title: "nope" })])]);
+    expect(merged.days).toEqual(twoDays.days);
+  });
+});
+
+describe("suggestDestinations", () => {
+  it("returns at most 4 ideas from one Haiku call", async () => {
+    const idea = {
+      destination: "Porto, Portugal",
+      why: "",
+      highlights: [],
+      weatherInMonth: "",
+      typicalDailyCostUsd: 90,
+      gettingThere: null,
+      watchOut: null,
+    };
+    const { client, parse } = fakeClient({ ideas: [idea, idea, idea, idea, idea] });
+    const result = await suggestDestinations(
+      { month: "2026-11", tripDays: 4, vibes: ["food"], budgetLevel: "mid-range" },
+      client,
+    );
+    expect(parse).toHaveBeenCalledOnce();
+    expect(parse.mock.calls[0][0].model).toBe(MODEL);
+    expect(parse.mock.calls[0][0].messages[0].content).toContain("November 2026");
+    expect(result.ideas).toHaveLength(4);
   });
 });

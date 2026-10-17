@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { makeDay, makeItem, makeItinerary } from "@/test/fixtures";
 import { ItinerarySchema, TripRequestSchema, tripLengthDays } from "./trip";
 
 const validTrip = {
@@ -52,35 +53,29 @@ describe("tripLengthDays", () => {
 
 describe("ItinerarySchema", () => {
   it("parses a well-formed itinerary", () => {
-    const result = ItinerarySchema.safeParse({
-      destination: "Lisbon",
-      summary: "Three easy days",
-      currency: "EUR",
-      estimatedTotalPerPerson: null,
-      tips: [],
-      days: [
-        {
-          day: 1,
-          date: "2026-11-01",
-          theme: "Alfama",
-          area: "Alfama",
-          weatherNote: null,
-          items: [
-            {
-              time: "09:00",
-              type: "meal",
-              title: "Breakfast",
-              placeId: null,
-              placeName: null,
-              durationMinutes: 45,
-              estimatedCostPerPerson: 8,
-              whyItFits: "Gentle start",
-              notes: null,
-            },
-          ],
-        },
-      ],
+    const itinerary = makeItinerary([
+      makeDay(1, [makeItem({ type: "meal", title: "Breakfast", estimatedCostPerPerson: 8 })]),
+    ]);
+    expect(ItinerarySchema.safeParse(itinerary).success).toBe(true);
+  });
+
+  it("requires the stay, packing list, and essentials sections", () => {
+    const withoutStay: Partial<ReturnType<typeof makeItinerary>> = makeItinerary([]);
+    delete withoutStay.stay;
+    expect(ItinerarySchema.safeParse(withoutStay).success).toBe(false);
+  });
+});
+
+describe("TripRequestSchema extras", () => {
+  it("accepts origin, passport, and capped feedback", () => {
+    const trip = TripRequestSchema.parse({
+      ...validTrip,
+      origin: "Delhi",
+      passportCountry: "India",
+      feedback: { liked: ["Tapas bars"] },
     });
-    expect(result.success).toBe(true);
+    expect(trip.feedback).toEqual({ liked: ["Tapas bars"], disliked: [] });
+    const tooMany = { liked: Array.from({ length: 11 }, (_, i) => `x${i}`) };
+    expect(TripRequestSchema.safeParse({ ...validTrip, feedback: tooMany }).success).toBe(false);
   });
 });

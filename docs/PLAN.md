@@ -156,36 +156,40 @@ TripMind is a free, publicly hosted AI travel planner, built as a portfolio proj
   - Next.js scaffold, linting and formatting, tests, CI
   - Itinerary schema and planner agent
   - Free data tools: geocoding, weather, places
-- [ ] **Phase 1: First working version**
+- [x] **Phase 1: First working version**
   - [x] Trip input form
-  - [x] Planner agent with tools and a Zod-validated itinerary
+  - [x] Planner with a Zod-validated itinerary (data fetched in code, one Claude Haiku call)
   - [x] Check that every recommended place is real
-  - [x] Day-by-day itinerary view
-  - [x] Map view for each day (Leaflet)
-  - [ ] Regenerate a day, swap an item, chat-based edits
-  - [ ] Save trips (Supabase auth), share links, PDF export
-  - [x] Daily trip quotas (per visitor and global) and cached data lookups
-  - [ ] Connect Upstash so quotas hold across serverless instances
+  - [x] Day-by-day itinerary view with a map for each day (Leaflet)
+  - [x] Regenerate a day, swap an item, chat-based edits
+  - [x] Save trips (in the browser; no accounts yet), share links (trip packed in the URL), print to PDF
+  - [x] Daily quotas (per visitor and global) and cached data lookups
   - [x] Public deploy on Vercel (https://tripmind-rho.vercel.app)
-- [ ] **Phase 2: Full coverage**
-  - Destination discovery quiz
-  - Where to stay, with links
-  - Transport links
-  - Budget, packing list, visa and pre-trip checklist
-  - Saved profiles and personalization from feedback
+- [x] **Phase 2: Full coverage**
+  - [x] "Help me choose" destination ideas
+  - [x] Where to stay (neighborhood pick) with Booking.com and Airbnb links
+  - [x] Transport links (Google Flights, Rome2Rio) and walking routes for each day in Google Maps
+  - [x] Budget breakdown compared with the traveler's budget
+  - [x] Packing list, visa/entry note and pre-trip essentials
+  - [x] Remembered preferences, and 👍/👎 feedback fed into future plans
+  - [x] Calendar export (.ics)
 - [ ] **Phase 3: Polish**
-  - Quota display and bring-your-own-key
-  - Admin dashboard
-  - Sentry and Playwright end-to-end tests
-  - Privacy policy and terms
-  - SEO template pages
-  - Progressive web app
-  - Portfolio README with a demo
+  - [x] Quota display
+  - [x] About and privacy page with disclaimers
+  - [x] Installable app manifest and icon
+  - [x] Portfolio README with features
+  - [ ] Connect Upstash so quotas hold across serverless instances (needs a free Upstash account)
+  - [ ] Accounts and cross-device sync (Supabase; needs a free account)
+  - [ ] Admin and cost dashboard (needs a database)
+  - [ ] Sentry error tracking (needs a free account) and Playwright end-to-end tests
+  - [ ] SEO template pages ("3 days in Lisbon")
+  - [ ] Offline support (service worker)
+  - [ ] Demo GIF in the README
 - [ ] **Phase 4: Extras**
-  - Collaboration and expense splitting
+  - Collaboration, voting and expense splitting
   - Price alerts
-  - Live re-planning
-  - Calendar sync
+  - Live re-planning during the trip
+  - Two-way calendar sync
   - Multiple languages
 
 ## Verification

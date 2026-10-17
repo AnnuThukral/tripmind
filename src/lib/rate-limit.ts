@@ -1,6 +1,8 @@
-// Daily trip-generation quotas: per visitor (by IP) and a global cap that
-// bounds total AI spend. Uses Upstash Redis over REST when configured; falls
-// back to per-instance memory, which is best-effort on serverless.
+// Daily AI-call quotas, per visitor (by IP) and globally, so total spend stays
+// bounded. Uses Upstash Redis over REST when configured; falls back to
+// per-instance memory, which is best-effort on serverless.
+
+export type QuotaKind = "trips" | "edits" | "ideas";
 
 export interface LimitResult {
   allowed: boolean;
@@ -13,10 +15,21 @@ export interface LimitConfig {
   global: number;
 }
 
-export function limitConfig(env: Record<string, string | undefined> = process.env): LimitConfig {
+const DEFAULTS: Record<QuotaKind, LimitConfig> = {
+  trips: { perVisitor: 3, global: 200 },
+  edits: { perVisitor: 20, global: 1000 },
+  ideas: { perVisitor: 5, global: 300 },
+};
+
+/** Env overrides: DAILY_TRIPS_PER_VISITOR, DAILY_EDITS_GLOBAL, etc. */
+export function limitConfig(
+  kind: QuotaKind,
+  env: Record<string, string | undefined> = process.env,
+): LimitConfig {
+  const prefix = `DAILY_${kind.toUpperCase()}`;
   return {
-    perVisitor: Number(env.DAILY_TRIPS_PER_VISITOR) || 3,
-    global: Number(env.DAILY_TRIPS_GLOBAL) || 200,
+    perVisitor: Number(env[`${prefix}_PER_VISITOR`]) || DEFAULTS[kind].perVisitor,
+    global: Number(env[`${prefix}_GLOBAL`]) || DEFAULTS[kind].global,
   };
 }
 
@@ -61,31 +74,54 @@ function defaultCounter(): Counter {
   return url && token ? upstashCounter(url, token) : memoryCounter;
 }
 
-/** Counts one trip generation and reports whether it is within quota. */
-export async function consumeTripQuota(
+/** Counts one AI call of the given kind and reports whether it is within quota. */
+export async function consumeQuota(
+  kind: QuotaKind,
   visitor: string,
-  config: LimitConfig = limitConfig(),
+  config: LimitConfig = limitConfig(kind),
   counter: Counter = defaultCounter(),
   now: Date = new Date(),
 ): Promise<LimitResult> {
   const day = dayKey(now);
   const ttl = 60 * 60 * 26;
+  const visitorKey = `${kind}:${day}:v:${visitor}`;
+  const globalKey = `${kind}:${day}:all`;
   let visitorCount: number;
   let globalCount: number;
   try {
     [visitorCount, globalCount] = await Promise.all([
-      counter(`trips:${day}:v:${visitor}`, ttl),
-      counter(`trips:${day}:all`, ttl),
+      counter(visitorKey, ttl),
+      counter(globalKey, ttl),
     ]);
   } catch (err) {
     // If the limiter store is down, fall back to memory rather than blocking everyone.
     console.error("Rate limiter unavailable, using memory", err);
     [visitorCount, globalCount] = await Promise.all([
-      memoryCounter(`trips:${day}:v:${visitor}`, ttl),
-      memoryCounter(`trips:${day}:all`, ttl),
+      memoryCounter(visitorKey, ttl),
+      memoryCounter(globalKey, ttl),
     ]);
   }
   if (globalCount > config.global) return { allowed: false, reason: "global", remaining: 0 };
   if (visitorCount > config.perVisitor) return { allowed: false, reason: "visitor", remaining: 0 };
   return { allowed: true, remaining: config.perVisitor - visitorCount };
+}
+
+const LIMIT_MESSAGES: Record<QuotaKind, string> = {
+  trips: "trip plans",
+  edits: "itinerary edits",
+  ideas: "destination ideas",
+};
+
+/** A 429 response for a refused quota, or null when the call may proceed. */
+export async function quotaGate(
+  kind: QuotaKind,
+  request: Request,
+): Promise<{ denied: Response } | { remaining: number }> {
+  const quota = await consumeQuota(kind, visitorId(request.headers));
+  if (quota.allowed) return { remaining: quota.remaining };
+  const error =
+    quota.reason === "global"
+      ? `TripMind has hit today's free limit for ${LIMIT_MESSAGES[kind]}. Please come back tomorrow.`
+      : `You've used today's free ${LIMIT_MESSAGES[kind]}. Please come back tomorrow.`;
+  return { denied: Response.json({ error }, { status: 429 }) };
 }

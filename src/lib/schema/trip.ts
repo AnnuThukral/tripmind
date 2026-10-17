@@ -42,6 +42,17 @@ export const TripRequestSchema = z
     pace: z.enum(PACES).default("balanced"),
     dietary: z.array(z.string().trim().min(1).max(40)).max(8).default([]),
     notes: z.string().trim().max(500).optional(),
+    /** Home city, for transport links. */
+    origin: z.string().trim().min(2).max(120).optional(),
+    /** Passport country, for the entry-requirements note. */
+    passportCountry: z.string().trim().min(2).max(60).optional(),
+    /** Things the traveler liked or disliked on earlier trips (from thumbs up/down). */
+    feedback: z
+      .object({
+        liked: z.array(z.string().trim().min(1).max(80)).max(10).default([]),
+        disliked: z.array(z.string().trim().min(1).max(80)).max(10).default([]),
+      })
+      .optional(),
   })
   .refine((t) => t.endDate >= t.startDate, {
     message: "End date must be on or after start date",
@@ -88,14 +99,59 @@ export const ItineraryDaySchema = z.object({
   items: z.array(ItineraryItemSchema),
 });
 
+export const StaySchema = z.object({
+  area: z.string().describe("Best neighborhood to stay in for this itinerary"),
+  why: z.string(),
+  alternatives: z.array(z.string()).describe("1-2 other good areas, each with a short reason"),
+  estimatedNightlyCost: z
+    .number()
+    .nullable()
+    .describe("Typical mid-range double room per night in the trip currency"),
+});
+
+export const EssentialsSchema = z.object({
+  entryRequirements: z
+    .string()
+    .describe("Visa/entry note for the traveler's passport, or general guidance if unknown"),
+  currency: z.string().describe("Local currency, payment habits, and tipping"),
+  language: z.string().describe("Language plus 2-3 useful phrases"),
+  plugs: z.string().describe("Plug type and voltage"),
+  emergencyNumber: z.string(),
+  gettingAround: z.string().describe("Airport transfer and local transport advice"),
+  safety: z.string().describe("Safety notes and common scams"),
+});
+
 export const ItinerarySchema = z.object({
   destination: z.string(),
   summary: z.string(),
   currency: z.string(),
   days: z.array(ItineraryDaySchema),
-  estimatedTotalPerPerson: z.number().nullable(),
+  estimatedTotalPerPerson: z
+    .number()
+    .nullable()
+    .describe("Activities, food, and local transport only (no flights or hotel)"),
   tips: z.array(z.string()),
+  stay: StaySchema,
+  packingList: z.array(z.string()).describe("8-15 items tailored to weather and activities"),
+  essentials: EssentialsSchema,
 });
+
+/** What the model returns for an edit: only the days it changed. */
+export const RevisionSchema = z.object({
+  days: z.array(ItineraryDaySchema).describe("Only the changed days, each with all its items"),
+  note: z.string().describe("One sentence telling the traveler what changed"),
+});
+
+export const RevisionRequestSchema = z.object({
+  trip: TripRequestSchema,
+  itinerary: ItinerarySchema,
+  instruction: z.string().trim().min(3).max(300),
+});
+
+export type Revision = z.infer<typeof RevisionSchema>;
+export type RevisionRequest = z.infer<typeof RevisionRequestSchema>;
+export type Stay = z.infer<typeof StaySchema>;
+export type Essentials = z.infer<typeof EssentialsSchema>;
 
 export type ItineraryItem = z.infer<typeof ItineraryItemSchema>;
 export type ItineraryDay = z.infer<typeof ItineraryDaySchema>;

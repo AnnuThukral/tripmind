@@ -104,38 +104,45 @@ export function toPlace(el: OverpassElement, category: PlaceCategory): Place | n
   };
 }
 
-// Public Overpass instances are often at capacity; fall through to the next one.
-// Failing instances usually answer within a second, so the timeout only bites
-// on an instance that accepted the query but is slow.
-// Ordered by observed speed for city-sized queries (mail.ru ~14s vs ~39s, Oct 2026).
+// Public Overpass instances are often at capacity, and which ones respond
+// depends on where the request comes from (mail.ru hangs from Vercel's US
+// region but is the fastest from Europe). So query all of them at once, take
+// the first success, and cancel the rest.
 export const OVERPASS_ENDPOINTS = [
-  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
   "https://overpass-api.de/api/interpreter",
+  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
   "https://overpass.private.coffee/api/interpreter",
 ];
 
+const OVERPASS_TIMEOUT_MS = 70_000;
+
 async function queryOverpass(query: string): Promise<{ elements: OverpassElement[] }> {
-  let lastError: unknown;
-  for (const endpoint of OVERPASS_ENDPOINTS) {
-    try {
-      return await fetchJson<{ elements: OverpassElement[] }>(
-        "Overpass",
-        endpoint,
-        {
-          method: "POST",
-          body: new URLSearchParams({ data: query }),
-          headers: {
-            "User-Agent": USER_AGENT,
-            "Content-Type": "application/x-www-form-urlencoded",
+  const cancelLosers = new AbortController();
+  try {
+    return await Promise.any(
+      OVERPASS_ENDPOINTS.map((endpoint) =>
+        fetchJson<{ elements: OverpassElement[] }>(
+          "Overpass",
+          endpoint,
+          {
+            method: "POST",
+            body: new URLSearchParams({ data: query }),
+            headers: {
+              "User-Agent": USER_AGENT,
+              "Content-Type": "application/x-www-form-urlencoded",
+            },
+            signal: cancelLosers.signal,
           },
-        },
-        40_000,
-      );
-    } catch (err) {
-      lastError = err;
-    }
+          OVERPASS_TIMEOUT_MS,
+        ),
+      ),
+    );
+  } catch (err) {
+    // Every instance failed; surface one of the underlying errors.
+    throw err instanceof AggregateError ? err.errors[0] : err;
+  } finally {
+    cancelLosers.abort();
   }
-  throw lastError;
 }
 
 /**

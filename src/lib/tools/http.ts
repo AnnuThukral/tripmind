@@ -22,7 +22,9 @@ export async function fetchJson<T>(
     res = await fetch(url, {
       ...init,
       headers: { "User-Agent": USER_AGENT, Accept: "application/json", ...init.headers },
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: init.signal
+        ? AbortSignal.any([init.signal, AbortSignal.timeout(timeoutMs)])
+        : AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
     throw new UpstreamError(service, err instanceof Error ? err.message : String(err));

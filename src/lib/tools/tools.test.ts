@@ -130,23 +130,35 @@ describe("places", () => {
     });
   });
 
-  it("falls back to the next Overpass mirror when one is at capacity", async () => {
-    const fetchFn = vi
-      .fn()
-      .mockResolvedValueOnce(new Response("at capacity", { status: 502 }))
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            elements: [
-              { type: "node", id: 7, lat: 1, lon: 1, tags: { name: "C", amenity: "cafe" } },
-            ],
-          }),
-        ),
+  it("queries every Overpass instance at once and cancels the rest after a success", async () => {
+    const [failing, working, hanging] = OVERPASS_ENDPOINTS;
+    let hangingSignal: AbortSignal | undefined;
+    const fetchFn = vi.fn((url: string, init: RequestInit) => {
+      if (url === failing) return Promise.resolve(new Response("at capacity", { status: 502 }));
+      if (url === working) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              elements: [
+                { type: "node", id: 7, lat: 1, lon: 1, tags: { name: "C", amenity: "cafe" } },
+              ],
+            }),
+          ),
+        );
+      }
+      expect(url).toBe(hanging);
+      hangingSignal = init.signal ?? undefined;
+      return new Promise<Response>((_, reject) =>
+        init.signal?.addEventListener("abort", () => reject(new Error("aborted"))),
       );
+    });
     vi.stubGlobal("fetch", fetchFn);
+
     const places = await searchPlaces(["cafes"], 1, 1);
+
     expect(places.map((p) => p.id)).toEqual(["osm:node/7"]);
-    expect(fetchFn.mock.calls.map((c) => c[0])).toEqual(OVERPASS_ENDPOINTS.slice(0, 2));
+    expect(fetchFn).toHaveBeenCalledTimes(OVERPASS_ENDPOINTS.length);
+    expect(hangingSignal?.aborted).toBe(true);
   });
 
   it("throws when every mirror fails", async () => {

@@ -7,7 +7,7 @@ import { getWeather } from "./weather";
 // and rate-limited, so repeat lookups for the same city should never hit them.
 // The plain functions stay uncached so they can be unit-tested outside Next.js.
 
-/** ~110 m precision: nearby searches from the model share a cache entry. */
+/** ~110 m precision so slightly different coordinates share a cache entry. */
 export function roundCoord(n: number): number {
   return Math.round(n * 1000) / 1000;
 }
@@ -18,15 +18,16 @@ export async function cachedGeocode(query: string) {
   return geocode(query.trim().toLowerCase());
 }
 
+/** Categories are sorted so the cache key doesn't depend on their order. */
 export async function cachedSearchPlaces(
-  category: PlaceCategory,
+  categories: PlaceCategory[],
   lat: number,
   lon: number,
   radiusMeters: number,
 ) {
   "use cache";
   cacheLife("days");
-  return searchPlaces(category, roundCoord(lat), roundCoord(lon), radiusMeters);
+  return searchPlaces([...categories].sort(), roundCoord(lat), roundCoord(lon), radiusMeters);
 }
 
 export async function cachedWeather(lat: number, lon: number, startDate: string, endDate: string) {

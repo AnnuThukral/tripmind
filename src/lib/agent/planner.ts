@@ -1,35 +1,51 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { betaZodOutputFormat, betaZodTool } from "@anthropic-ai/sdk/helpers/beta/zod";
-import { z } from "zod";
-import { cachedGeocode, cachedSearchPlaces, cachedWeather } from "@/lib/tools/cached";
-import { PLACE_CATEGORIES, type Place } from "@/lib/tools/places";
+import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import {
   ItinerarySchema,
   tripLengthDays,
   type Itinerary,
   type TripRequest,
 } from "@/lib/schema/trip";
+import { cachedGeocode, cachedSearchPlaces, cachedWeather } from "@/lib/tools/cached";
+import type { GeoResult } from "@/lib/tools/geocode";
+import type { Place, PlaceCategory } from "@/lib/tools/places";
+import type { WeatherReport } from "@/lib/tools/weather";
 
 // Cheapest current model by default; override with PLANNER_MODEL.
 export const DEFAULT_MODEL = "claude-haiku-5-5";
 
-const SYSTEM_PROMPT = `You are TripMind, an expert travel planner. Build a realistic, personalized day-by-day itinerary.
-
-How to work:
-1. Call geocode_destination once to get coordinates.
-2. Call get_weather for the trip dates.
-3. Call search_places for the categories that match the traveler's interests, plus restaurants or cafes for meals. Use smaller radii around specific neighborhoods to keep each day in one area.
-4. Return the itinerary as JSON.
+// Data is fetched in code up front and handed to the model in one request.
+// An earlier tool-calling loop needed several model turns plus one slow
+// Overpass request per category, which overran the serverless time limit.
+const SYSTEM_PROMPT = `You are TripMind, an expert travel planner. Build a realistic, personalized day-by-day itinerary from the traveler's preferences, the weather, and the list of real candidate places provided.
 
 Rules:
-- Only recommend specific venues that a search_places call returned, and copy their exact "id" into placeId. For generic items (a walk, hotel rest, transit) use placeId null.
-- Cluster each day geographically; avoid zig-zagging across the city.
+- Only recommend specific venues from the candidate list, and copy their exact id into placeId. For generic items (a neighborhood walk, hotel rest, transit) use placeId null.
+- Cluster each day geographically using the coordinates; avoid zig-zagging across the city.
 - Respect pace: relaxed = 3-4 items/day, balanced = 5-6, packed = 7-8 (meals count as items).
-- Include breakfast/lunch/dinner suggestions that respect dietary needs.
-- Respect openingHours when present; put indoor options on rainy days.
+- Include breakfast, lunch, and dinner suggestions that respect dietary needs (prefer places tagged with a matching diet).
+- Respect opening hours when listed; put indoor options on rainy days.
 - Day 1 should be lighter to allow for arrival.
 - Costs are rough estimates in the trip currency; use null when you have no basis.
-- whyItFits must reference the traveler's stated interests, pace, or constraints.`;
+- whyItFits must reference the traveler's stated interests, pace, or constraints.
+- If few candidates are available, fill the plan with generic items rather than inventing venues.`;
+
+const ALWAYS_CATEGORIES: PlaceCategory[] = ["sights", "restaurants", "cafes"];
+
+const INTEREST_CATEGORIES: Record<string, PlaceCategory[]> = {
+  history: ["museums", "worship"],
+  art: ["museums"],
+  food: ["street_food"],
+  nightlife: ["nightlife"],
+  nature: ["nature"],
+  hiking: ["nature"],
+  beaches: ["nature"],
+  shopping: ["shopping"],
+  photography: ["nature"],
+  wellness: ["nature"],
+  architecture: ["worship"],
+  family: ["nature", "museums"],
+};
 
 export interface PlanResult {
   itinerary: Itinerary;
@@ -45,6 +61,14 @@ export class PlannerError extends Error {
     super(message);
     this.name = "PlannerError";
   }
+}
+
+export function categoriesFor(interests: readonly string[]): PlaceCategory[] {
+  const categories = new Set<PlaceCategory>(ALWAYS_CATEGORIES);
+  for (const interest of interests) {
+    for (const c of INTEREST_CATEGORIES[interest.toLowerCase()] ?? []) categories.add(c);
+  }
+  return [...categories];
 }
 
 export function describeTrip(trip: TripRequest): string {
@@ -64,9 +88,42 @@ export function describeTrip(trip: TripRequest): string {
   return lines.join("\n");
 }
 
+export function describeWeather(weather: WeatherReport | null): string {
+  if (!weather) return "Weather: unavailable.";
+  if (weather.source === "unavailable") return `Weather: ${weather.note}`;
+  return [
+    "Weather forecast:",
+    ...weather.days.map(
+      (d) =>
+        `- ${d.date}: ${d.summary}, ${Math.round(d.tempMinC)}-${Math.round(d.tempMaxC)}°C` +
+        (d.precipitationProbability !== null ? `, ${d.precipitationProbability}% rain` : ""),
+    ),
+  ].join("\n");
+}
+
+/** Compact, one-line-per-place listing to keep the prompt small. */
+export function describePlaces(places: readonly Place[]): string {
+  if (places.length === 0) return "Candidate places: none available (use generic items).";
+  const lines = ["Candidate places (id | name | category | lat,lon | details):"];
+  for (const p of places) {
+    const details = [
+      p.cuisine && `cuisine=${p.cuisine}`,
+      p.openingHours && `hours=${p.openingHours}`,
+      p.diet && `diet=${p.diet.join(",")}`,
+    ]
+      .filter(Boolean)
+      .join("; ");
+    lines.push(
+      `${p.id} | ${p.name} | ${p.category} | ${p.lat.toFixed(4)},${p.lon.toFixed(4)}` +
+        (details ? ` | ${details}` : ""),
+    );
+  }
+  return lines.join("\n");
+}
+
 /**
- * Drop any placeId the agent invented: every venue must trace back to a
- * search_places result. Returns warnings describing what was removed.
+ * Drop any placeId the model invented: every venue must trace back to a
+ * fetched candidate. Returns warnings describing what was removed.
  */
 export function enforceGroundedPlaces(
   itinerary: Itinerary,
@@ -88,89 +145,71 @@ export function enforceGroundedPlaces(
   return warnings;
 }
 
+async function timed<T>(label: string, work: Promise<T>): Promise<T> {
+  const start = Date.now();
+  try {
+    return await work;
+  } finally {
+    console.log(`[planner] ${label}: ${Date.now() - start}ms`);
+  }
+}
+
 export async function planTrip(
   trip: TripRequest,
   client: Anthropic = new Anthropic(),
 ): Promise<PlanResult> {
   const model = process.env.PLANNER_MODEL || DEFAULT_MODEL;
-  const knownPlaces = new Map<string, Place>();
+  const warnings: string[] = [];
 
-  const geocodeTool = betaZodTool({
-    name: "geocode_destination",
-    description: "Resolve a place name to latitude/longitude and country.",
-    inputSchema: z.object({ query: z.string().describe("City or area name") }),
-    run: async ({ query }) =>
-      JSON.stringify((await cachedGeocode(query)) ?? { error: "not found" }),
-  });
+  const geo: GeoResult | null = await timed("geocode", cachedGeocode(trip.destination));
+  if (!geo) throw new PlannerError(`Couldn't find "${trip.destination}". Try a city name.`);
 
-  const weatherTool = betaZodTool({
-    name: "get_weather",
-    description: "Daily weather forecast for the trip dates (up to 16 days ahead).",
-    inputSchema: z.object({
-      lat: z.number(),
-      lon: z.number(),
-      startDate: z.string().describe("YYYY-MM-DD"),
-      endDate: z.string().describe("YYYY-MM-DD"),
-    }),
-    run: async ({ lat, lon, startDate, endDate }) =>
-      JSON.stringify(await cachedWeather(lat, lon, startDate, endDate)),
-  });
-
-  const placesTool = betaZodTool({
-    name: "search_places",
-    description:
-      "Find real, named places near a point from OpenStreetMap. Returns ids to use as placeId.",
-    inputSchema: z.object({
-      category: z.enum(Object.keys(PLACE_CATEGORIES) as [keyof typeof PLACE_CATEGORIES]),
-      lat: z.number(),
-      lon: z.number(),
-      radiusMeters: z.number().describe("Search radius, 500-8000").optional(),
-    }),
-    run: async ({ category, lat, lon, radiusMeters }) => {
-      const radius = Math.min(Math.max(radiusMeters ?? 3000, 500), 8000);
-      const places = await cachedSearchPlaces(category, lat, lon, radius);
-      for (const p of places) knownPlaces.set(p.id, p);
-      return JSON.stringify(places);
-    },
-  });
-
-  const runner = client.beta.messages.toolRunner({
-    model,
-    max_tokens: 16000,
-    max_iterations: 12,
-    system: SYSTEM_PROMPT,
-    tools: [geocodeTool, weatherTool, placesTool],
-    output_config: { format: betaZodOutputFormat(ItinerarySchema) },
-    messages: [{ role: "user", content: describeTrip(trip) }],
-  });
-
-  let inputTokens = 0;
-  let outputTokens = 0;
-  for await (const message of runner) {
-    inputTokens += message.usage.input_tokens;
-    outputTokens += message.usage.output_tokens;
-  }
-  const final = await runner.done();
-
-  if (final.stop_reason === "refusal") throw new PlannerError("The model declined this request.");
-  if (final.stop_reason === "max_tokens")
-    throw new PlannerError("Itinerary was too long to finish.");
-
-  const text = final.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("");
-  let json: unknown;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    throw new PlannerError("Planner did not return valid JSON.");
-  }
-  const parsed = ItinerarySchema.safeParse(json);
-  if (!parsed.success) throw new PlannerError("Planner returned an itinerary in the wrong shape.");
-
-  const itinerary = parsed.data;
-  const warnings = enforceGroundedPlaces(itinerary, knownPlaces);
-  if (knownPlaces.size === 0) {
+  // Weather and places are independent; a failure in either degrades the plan
+  // rather than failing it.
+  const [weatherResult, placesResult] = await Promise.allSettled([
+    timed("weather", cachedWeather(geo.lat, geo.lon, trip.startDate, trip.endDate)),
+    timed("places", cachedSearchPlaces(categoriesFor(trip.interests), geo.lat, geo.lon, 4000)),
+  ]);
+  const weather = weatherResult.status === "fulfilled" ? weatherResult.value : null;
+  const candidates = placesResult.status === "fulfilled" ? placesResult.value : [];
+  if (placesResult.status === "rejected") {
+    console.error("[planner] places failed", placesResult.reason);
     warnings.push("Place data was unavailable, so no specific venues could be verified.");
   }
+
+  const prompt = [
+    describeTrip(trip),
+    `Resolved location: ${geo.displayName} (${geo.lat.toFixed(4)}, ${geo.lon.toFixed(4)})`,
+    describeWeather(weather),
+    describePlaces(candidates),
+  ].join("\n\n");
+
+  const response = await timed(
+    "model",
+    client.messages.parse({
+      model,
+      max_tokens: 16000,
+      system: SYSTEM_PROMPT,
+      messages: [{ role: "user", content: prompt }],
+      output_config: { format: zodOutputFormat(ItinerarySchema) },
+    }),
+  );
+
+  if (response.stop_reason === "refusal") {
+    throw new PlannerError("The model declined this request.");
+  }
+  if (response.stop_reason === "max_tokens") {
+    throw new PlannerError("Itinerary was too long to finish.");
+  }
+  // Re-validate rather than trusting the helper's parse result alone.
+  const parsed = ItinerarySchema.safeParse(response.parsed_output);
+  if (!parsed.success) {
+    throw new PlannerError("Planner returned an itinerary in the wrong shape.");
+  }
+
+  const itinerary = parsed.data;
+  const known = new Map(candidates.map((p) => [p.id, p]));
+  warnings.push(...enforceGroundedPlaces(itinerary, known));
   const expectedDays = tripLengthDays(trip.startDate, trip.endDate);
   if (itinerary.days.length !== expectedDays) {
     warnings.push(`Expected ${expectedDays} days but got ${itinerary.days.length}.`);
@@ -179,9 +218,18 @@ export async function planTrip(
   const places: Record<string, Place> = {};
   for (const day of itinerary.days) {
     for (const item of day.items) {
-      if (item.placeId) places[item.placeId] = knownPlaces.get(item.placeId)!;
+      if (item.placeId) places[item.placeId] = known.get(item.placeId)!;
     }
   }
 
-  return { itinerary, places, warnings, model, usage: { inputTokens, outputTokens } };
+  return {
+    itinerary,
+    places,
+    warnings,
+    model,
+    usage: {
+      inputTokens: response.usage.input_tokens,
+      outputTokens: response.usage.output_tokens,
+    },
+  };
 }

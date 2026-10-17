@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { geocode } from "./geocode";
 import { UpstreamError } from "./http";
-import { buildOverpassQuery, OVERPASS_ENDPOINTS, searchPlaces, toPlace } from "./places";
+import {
+  buildOverpassQuery,
+  categorize,
+  OVERPASS_ENDPOINTS,
+  searchPlaces,
+  toPlace,
+} from "./places";
 import { describeWeatherCode, getWeather } from "./weather";
 
 function mockFetch(body: unknown, status = 200) {
@@ -82,10 +88,19 @@ describe("weather", () => {
 });
 
 describe("places", () => {
-  it("builds an Overpass query for each category filter", () => {
-    const q = buildOverpassQuery("museums", 1, 2, 1000, 10);
-    expect(q).toContain('nwr[tourism~"^(museum|gallery)$"]["name"](around:1000,1,2);');
-    expect(q).toContain("out center tags 10;");
+  it("builds one query with a separately limited output per category", () => {
+    const q = buildOverpassQuery(["museums", "cafes"], 1, 2, 1000, 10);
+    expect(q).toBe(
+      "[out:json][timeout:25];" +
+        '(nwr["tourism"~"^(museum|gallery)$"]["name"](around:1000,1,2););out center tags 10;' +
+        '(nwr["amenity"~"^(cafe|ice_cream)$"]["name"](around:1000,1,2););out center tags 10;',
+    );
+  });
+
+  it("categorizes by the first requested category that matches", () => {
+    expect(categorize({ amenity: "marketplace" }, ["street_food", "shopping"])).toBe("street_food");
+    expect(categorize({ amenity: "marketplace" }, ["shopping", "street_food"])).toBe("shopping");
+    expect(categorize({ amenity: "bank" }, ["shopping"])).toBeNull();
   });
 
   it("normalizes elements and reads diet tags", () => {
@@ -122,12 +137,14 @@ describe("places", () => {
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
-            elements: [{ type: "node", id: 7, lat: 1, lon: 1, tags: { name: "C" } }],
+            elements: [
+              { type: "node", id: 7, lat: 1, lon: 1, tags: { name: "C", amenity: "cafe" } },
+            ],
           }),
         ),
       );
     vi.stubGlobal("fetch", fetchFn);
-    const places = await searchPlaces("cafes", 1, 1);
+    const places = await searchPlaces(["cafes"], 1, 1);
     expect(places.map((p) => p.id)).toEqual(["osm:node/7"]);
     expect(fetchFn.mock.calls.map((c) => c[0])).toEqual(OVERPASS_ENDPOINTS.slice(0, 2));
   });
@@ -137,19 +154,28 @@ describe("places", () => {
       "fetch",
       vi.fn().mockImplementation(async () => new Response("", { status: 504 })),
     );
-    await expect(searchPlaces("cafes", 1, 1)).rejects.toBeInstanceOf(UpstreamError);
+    await expect(searchPlaces(["cafes"], 1, 1)).rejects.toBeInstanceOf(UpstreamError);
   });
 
-  it("drops unnamed elements and de-duplicates by name", async () => {
+  it("drops unnamed and uncategorized elements, de-duplicates, and caps per category", async () => {
+    const cafe = (id: number, name?: string) => ({
+      type: "node",
+      id,
+      lat: 1,
+      lon: 1,
+      tags: { amenity: "cafe", ...(name && { name }) },
+    });
     mockFetch({
       elements: [
-        { type: "node", id: 1, lat: 1, lon: 1, tags: { name: "A" } },
-        { type: "node", id: 2, lat: 1, lon: 1, tags: { name: "A" } },
-        { type: "node", id: 3, lat: 1, lon: 1, tags: {} },
-        { type: "node", id: 4, lat: 1, lon: 1, tags: { name: "B" } },
+        cafe(1, "A"),
+        cafe(2, "A"),
+        cafe(3),
+        { type: "node", id: 4, lat: 1, lon: 1, tags: { name: "Bank", amenity: "bank" } },
+        cafe(5, "B"),
+        cafe(6, "C"),
       ],
     });
-    const places = await searchPlaces("cafes", 1, 1);
-    expect(places.map((p) => p.id)).toEqual(["osm:node/1", "osm:node/4"]);
+    const places = await searchPlaces(["cafes"], 1, 1, 1000, 2);
+    expect(places.map((p) => p.id)).toEqual(["osm:node/1", "osm:node/5"]);
   });
 });

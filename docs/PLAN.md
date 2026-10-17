@@ -91,7 +91,7 @@ TripMind is a free, publicly hosted AI travel planner, built as a portfolio proj
 - **Per-trip inputs:** origin, destination (or "help me choose"), dates (fixed or flexible), travelers, budget, purpose of the trip.
 - **Saved profile:** interests, pace, accommodation style, diet, accessibility needs, passport, must-sees, things to avoid.
 - **How the AI uses it:**
-  - The agent looks up real places, weather and routes through tools.
+  - TripMind fetches real places and weather in code, then makes one Claude call with them.
   - It returns an itinerary as validated JSON.
   - It explains each pick ("whyItFits").
   - It learns from feedback and edits.

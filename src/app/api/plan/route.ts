@@ -4,8 +4,8 @@ import { consumeTripQuota, visitorId } from "@/lib/rate-limit";
 import { TripRequestSchema } from "@/lib/schema/trip";
 import { UpstreamError } from "@/lib/tools/http";
 
-// Several Overpass lookups plus model turns; public OSM servers can be slow.
-export const maxDuration = 120;
+// A slow public Overpass server plus one model call; Vercel Hobby allows up to 300s.
+export const maxDuration = 300;
 
 export async function POST(request: Request) {
   if (process.env.AI_DISABLED === "true") {

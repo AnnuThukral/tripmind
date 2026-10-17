@@ -7,7 +7,8 @@ TripMind is an AI travel planner and portfolio project, deployed on Vercel from 
 ## Constraints
 
 - **The budget is close to zero.** Use free, keyless data sources (OSM, Open-Meteo). Default to the cheapest Claude model (`claude-haiku-5-5`), which `PLANNER_MODEL` can override. Don't add paid APIs without asking.
-- **Every recommended place must be real.** Recommended places must come from tool results. `enforceGroundedPlaces` in `src/lib/agent/planner.ts` unlinks anything else, so keep that check whenever the agent changes.
+- **Every recommended place must be real.** Recommended places must come from the fetched candidate list. `enforceGroundedPlaces` in `src/lib/agent/planner.ts` unlinks anything else, so keep that check whenever the planner changes.
+- **Keep the planner to one model call.** Fetch data in code first. An earlier tool-calling loop needed several model turns and slow Overpass requests, and timed out on Vercel.
 - **The itinerary schema** (`src/lib/schema/trip.ts`) is also the structured-output schema. Keep it free of numeric and length constraints, and do semantic checks in code after parsing.
 - **API keys stay on the server.** Never expose them to client components.
 

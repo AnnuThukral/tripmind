@@ -1,5 +1,7 @@
 # TripMind
 
+**Live:** https://tripmind-rho.vercel.app
+
 TripMind is an AI travel planner that builds a personalized, day-by-day itinerary from real places, live weather and your own preferences.
 
 You tell it where you're going, when, who's coming, your budget, your interests, your pace and any dietary needs. TripMind then:

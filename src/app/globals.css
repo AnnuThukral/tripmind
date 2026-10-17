@@ -24,3 +24,17 @@ body {
   color: var(--foreground);
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
 }
+
+/* Number inside each map stop marker (see DayMap). */
+.leaflet-tooltip.tm-stop-label {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  padding: 0;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+}
+.leaflet-tooltip.tm-stop-label::before {
+  display: none;
+}

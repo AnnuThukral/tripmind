@@ -161,10 +161,11 @@ TripMind is a free, publicly hosted AI travel planner, built as a portfolio proj
   - [x] Planner agent with tools and a Zod-validated itinerary
   - [x] Check that every recommended place is real
   - [x] Day-by-day itinerary view
-  - [ ] Map view for each day (Leaflet)
+  - [x] Map view for each day (Leaflet)
   - [ ] Regenerate a day, swap an item, chat-based edits
   - [ ] Save trips (Supabase auth), share links, PDF export
-  - [ ] Rate limiting (Upstash) and caching
+  - [x] Daily trip quotas (per visitor and global) and cached data lookups
+  - [ ] Connect Upstash so quotas hold across serverless instances
   - [ ] Public deploy on Vercel
 - [ ] **Phase 2: Full coverage**
   - Destination discovery quiz

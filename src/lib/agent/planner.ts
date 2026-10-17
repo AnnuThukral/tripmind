@@ -1,9 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { betaZodOutputFormat, betaZodTool } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod";
-import { geocode } from "@/lib/tools/geocode";
-import { PLACE_CATEGORIES, searchPlaces, type Place } from "@/lib/tools/places";
-import { getWeather } from "@/lib/tools/weather";
+import { cachedGeocode, cachedSearchPlaces, cachedWeather } from "@/lib/tools/cached";
+import { PLACE_CATEGORIES, type Place } from "@/lib/tools/places";
 import {
   ItinerarySchema,
   tripLengthDays,
@@ -34,6 +33,8 @@ Rules:
 
 export interface PlanResult {
   itinerary: Itinerary;
+  /** Verified places referenced by the itinerary, keyed by placeId (for maps and links). */
+  places: Record<string, Place>;
   warnings: string[];
   model: string;
   usage: { inputTokens: number; outputTokens: number };
@@ -98,7 +99,8 @@ export async function planTrip(
     name: "geocode_destination",
     description: "Resolve a place name to latitude/longitude and country.",
     inputSchema: z.object({ query: z.string().describe("City or area name") }),
-    run: async ({ query }) => JSON.stringify((await geocode(query)) ?? { error: "not found" }),
+    run: async ({ query }) =>
+      JSON.stringify((await cachedGeocode(query)) ?? { error: "not found" }),
   });
 
   const weatherTool = betaZodTool({
@@ -111,7 +113,7 @@ export async function planTrip(
       endDate: z.string().describe("YYYY-MM-DD"),
     }),
     run: async ({ lat, lon, startDate, endDate }) =>
-      JSON.stringify(await getWeather(lat, lon, startDate, endDate)),
+      JSON.stringify(await cachedWeather(lat, lon, startDate, endDate)),
   });
 
   const placesTool = betaZodTool({
@@ -126,7 +128,7 @@ export async function planTrip(
     }),
     run: async ({ category, lat, lon, radiusMeters }) => {
       const radius = Math.min(Math.max(radiusMeters ?? 3000, 500), 8000);
-      const places = await searchPlaces(category, lat, lon, radius);
+      const places = await cachedSearchPlaces(category, lat, lon, radius);
       for (const p of places) knownPlaces.set(p.id, p);
       return JSON.stringify(places);
     },
@@ -166,10 +168,20 @@ export async function planTrip(
 
   const itinerary = parsed.data;
   const warnings = enforceGroundedPlaces(itinerary, knownPlaces);
+  if (knownPlaces.size === 0) {
+    warnings.push("Place data was unavailable, so no specific venues could be verified.");
+  }
   const expectedDays = tripLengthDays(trip.startDate, trip.endDate);
   if (itinerary.days.length !== expectedDays) {
     warnings.push(`Expected ${expectedDays} days but got ${itinerary.days.length}.`);
   }
 
-  return { itinerary, warnings, model, usage: { inputTokens, outputTokens } };
+  const places: Record<string, Place> = {};
+  for (const day of itinerary.days) {
+    for (const item of day.items) {
+      if (item.placeId) places[item.placeId] = knownPlaces.get(item.placeId)!;
+    }
+  }
+
+  return { itinerary, places, warnings, model, usage: { inputTokens, outputTokens } };
 }

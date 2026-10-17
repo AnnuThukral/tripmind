@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { PlannerError, planTrip } from "@/lib/agent/planner";
+import { consumeTripQuota, visitorId } from "@/lib/rate-limit";
 import { TripRequestSchema } from "@/lib/schema/trip";
 import { UpstreamError } from "@/lib/tools/http";
 
@@ -27,6 +28,15 @@ export async function POST(request: Request) {
       { error: "Invalid trip details.", issues: parsed.error.issues },
       { status: 400 },
     );
+  }
+
+  const quota = await consumeTripQuota(visitorId(request.headers));
+  if (!quota.allowed) {
+    const error =
+      quota.reason === "global"
+        ? "TripMind has hit today's free planning limit. Please come back tomorrow."
+        : "You've used today's free trip plans. Please come back tomorrow.";
+    return Response.json({ error }, { status: 429 });
   }
 
   try {

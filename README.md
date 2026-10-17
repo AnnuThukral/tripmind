@@ -1,0 +1,2 @@
+# tripmind
+AI Travel Planner
